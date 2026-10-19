@@ -1,0 +1,48 @@
+node_id,label,modality
+0,start,start
+1,end,end
+3,confidence,f
+4,arm gesture left,g
+5,thoughtful,i
+6,hard head nod,g
+7,neutral,f
+8, Contrast.Conjunction,t
+9, Conjunction.Start,t
+10,confused,f
+11,hesitant,i
+12, Affirmation,t
+13,short pause,i
+14, First.Person.Single,t
+15,uncertain,i
+16,scared,f
+17,inhales deeply,i
+18,head nod yes,g
+19, Second.Person,t
+20,excited,i
+21,acknowledging,g
+22,nervously look around,g
+23,agreeing 2,g
+24,looking around,g
+25,pointing,g
+26,hapiness,f
+27,exhales sharply,i
+28,clear throat,i
+29,look around,g
+30,clear,i
+31,arm gesture right,g
+32,pointing forward,g
+33, Truth.Intensifier,t
+34, Please,t
+35,no,g
+36,angry,i
+37,shaking head no,g
+38,sad,f
+39,clears throat,i
+40,look over shoulder right,g
+41,thoughtful head shake,g
+42, First.Person.Plural,t
+43,concerned,f
+44,urgent,i
+45,stop_hand,g
+46,low urgent,i
+47,point_right,g
