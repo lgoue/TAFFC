@@ -185,7 +185,7 @@ class FusedGromovWassersteinGraphKMeans():
 
         for k in range(self.n_clusters):
             cluster_data = [x.values() for x in X[self.labels_ == k]]
-            structural_information = [x.distance_matrix(force_recompute=True,method='shortest_path_weight') for x in X[self.labels_ == k]]
+            structural_information = [x.C for x in X[self.labels_ == k]]
             if self.N is None:
                 centroid_mean_size=int(numpy.mean([len(x.nodes()) for x in X[self.labels_ == k]])) #size of the centroid in the cluster is the mean size of the nodes of the graphs in the cluster
             else:    
