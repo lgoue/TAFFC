@@ -187,16 +187,17 @@ class FusedGromovWassersteinGraphKMeans():
             cluster_data = [x.values() for x in X[self.labels_ == k]]
             structural_information = [x.C for x in X[self.labels_ == k]]
             if self.N is None:
-                centroid_mean_size=int(numpy.mean([len(x.nodes()) for x in X[self.labels_ == k]])) #size of the centroid in the cluster is the mean size of the nodes of the graphs in the cluster
+                # size of the centroid: median number of nodes of the graphs in the cluster
+                centroid_size=int(numpy.floor(numpy.median([len(x.nodes()) for x in X[self.labels_ == k]])+0.5))
             else:    
-                centroid_mean_size=self.N
+                centroid_size=self.N
 
             internal_weights = [numpy.ones(len(x.nodes())) / len(x.nodes()) for x in X[self.labels_ == k]]
             graph_weights = numpy.ones(len(cluster_data)) / len(cluster_data)
             
 
                         
-            features, structure, _ = fgw_barycenters(N=centroid_mean_size,
+            features, structure, _ = fgw_barycenters(N=centroid_size,
                                                      Ys=cluster_data,
                                                      Cs=structural_information,
                                                      ps=internal_weights,
@@ -205,8 +206,6 @@ class FusedGromovWassersteinGraphKMeans():
                                                      max_iter=self.max_iter_barycenter,
                                                      fixed_structure=False,
                                                      fixed_features=False,
-                                                     init_X=np.zeros((15,768)),
-                                                    
                                                      verbose=(self.verbose == 2))
             self._cluster_centers_features[k] = features
             self._cluster_centers_structure[k] = structure

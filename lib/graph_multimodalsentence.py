@@ -42,6 +42,7 @@ import pandas as pd
 from matplotlib import cm
 from scipy.sparse.csgraph import shortest_path
 
+from FGW import fgw_barycenters
 # Shared with ot_distances, which catches graph.NoAttrMatrix.
 from graph import NoAttrMatrix
 
@@ -360,6 +361,49 @@ class Graph():
 
         imageio.mimsave(filename, frames, duration=1000 / fps)
         return filename
+
+
+#%% Barycenter
+
+def barycenter_size(graphs):
+    """Number of nodes of a barycenter: median number of nodes of the graphs
+    (rounded half up)."""
+    return int(np.floor(np.median([len(g.nodes()) for g in graphs]) + 0.5))
+
+
+def compute_barycenter(graphs, alpha, N=None, max_iter=100, verbose=False):
+    """FGW barycenter of a group of sentence graphs, with uniform weights.
+
+    Parameters
+    ----------
+    graphs : list of Graph
+        Graphs without any node are ignored.
+    alpha : float
+        Trade-off parameter of FGW.
+    N : int, optional
+        Number of nodes of the barycenter. Default: median number of nodes of the graphs.
+
+    Returns
+    -------
+    Graph holding the barycenter features and structure matrix.
+    """
+    graphs = [g for g in graphs if len(g.nodes()) > 0]
+    if not graphs:
+        raise ValueError("No non-empty graph to average.")
+    if N is None:
+        N = barycenter_size(graphs)
+
+    features, C, _ = fgw_barycenters(
+        N,
+        Ys=[g.all_matrix_attr() for g in graphs],
+        Cs=[g.distance_matrix() for g in graphs],
+        ps=[np.ones(len(g.nodes())) / len(g.nodes()) for g in graphs],
+        lambdas=np.ones(len(graphs)) / len(graphs),
+        alpha=alpha,
+        max_iter=max_iter,
+        verbose=verbose,
+    )
+    return Graph.from_barycenter(features, C)
 
 
 #%% Barycenter utilities
