@@ -51,9 +51,9 @@ from graph import NoAttrMatrix
 
 DEFAULT_GESTURE_FILE = Path(__file__).resolve().parent.parent / "data" / "gestures.csv"
 
-# Average English reading rate (Rayner et al., 2009), used to convert gesture
-# durations from seconds to words.
-WORDS_PER_SECOND = 2.0
+# Average English speaking rate (about 160 words per minute), used to convert
+# gesture durations from seconds to words.
+WORDS_PER_SECOND = 2.7
 
 # {f: ...}, {g: ...}, {t: ...} or [prosody]
 TAG_PATTERN = re.compile(r"\{([fgt]):\s*([^}]*)\}|\[([^\]]*)\]")
