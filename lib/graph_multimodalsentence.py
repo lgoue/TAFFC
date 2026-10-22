@@ -488,3 +488,178 @@ def draw_transp(G1, G2, transp, shiftx=1, shifty=0, thresh=0.09, swipy=False, sw
             mass = transp[invd1[k1], invd2[k2]]
             if mass > thresh:
                 plt.plot([p1[0], p2[0]], [p1[1], p2[1]], "k--", alpha=mass / np.max(transp), lw=2)
+
+
+#%% Timeline drawing of sentence graphs
+
+# Lanes from top to bottom.
+MODALITY_ORDER = ["f", "g", "i", "t"]
+LANE_GAP = 0.6
+
+
+def timeline_layout(graph):
+    """Positions of the cues on a timeline: x is the middle of the cue span (in
+    words), y the lane of its modality. A lane is split into rows so that cues
+    of the same modality never overlap.
+
+    Returns
+    -------
+    pos : dict {node: (x, y)}
+    lanes : dict {modality: (y_bottom, y_top)}
+    height : float, total height of the lanes
+    """
+    rows, n_rows = {}, {}
+    for modality in MODALITY_ORDER:
+        row_ends = []  # end of the last cue of each row
+        indexed = [(k, cue) for k, cue in enumerate(graph.cues) if cue.modality == modality]
+        for k, cue in sorted(indexed, key=lambda kc: kc[1].onset):
+            span_end = cue.onset + max(cue.duration, 1)  # a zero-length cue still takes one word
+            for row, end in enumerate(row_ends):
+                if end <= cue.onset:
+                    row_ends[row] = span_end
+                    break
+            else:
+                row = len(row_ends)
+                row_ends.append(span_end)
+            rows[k] = row
+        n_rows[modality] = max(len(row_ends), 1)
+
+    lanes, y = {}, 0.0
+    for modality in reversed(MODALITY_ORDER):
+        lanes[modality] = (y, y + n_rows[modality])
+        y += n_rows[modality] + LANE_GAP
+    height = y - LANE_GAP
+
+    pos = {}
+    for k, cue in enumerate(graph.cues):
+        y_top = lanes[cue.modality][1]
+        pos[k] = (cue.onset + max(cue.duration, 1) / 2, y_top - rows[k] - 0.5)
+    return pos, lanes, height
+
+
+def draw_sentence_graph(graph, ax=None, y_offset=0, words_position="bottom", show_edges=True, title=None):
+    """Draws a sentence graph on a timeline.
+
+    Each cue is a node in the lane of its modality, with a bar showing its
+    extent in words. The words of the transcript are written along the time
+    axis. With ``show_edges``, cues that overlap in time (C = 0) are linked.
+
+    Returns
+    -------
+    pos : dict {node: (x, y)}, positions including ``y_offset``
+    """
+    if graph.sentence is None:
+        raise ValueError("Timeline drawing requires a graph built from a sentence.")
+    if ax is None:
+        _, ax = plt.subplots(figsize=(max(8, 0.6 * graph.n_words), 3.5))
+
+    pos, lanes, height = timeline_layout(graph)
+    pos = {k: (x, y + y_offset) for k, (x, y) in pos.items()}
+    n_cells = max(graph.n_words, max((cue.end for cue in graph.cues), default=0), 1)
+
+    # Lanes and word grid
+    for modality, (bottom, top) in lanes.items():
+        ax.axhspan(bottom + y_offset - 0.1, top + y_offset + 0.1, color=MODALITY_COLORS[modality], alpha=0.06, lw=0)
+        ax.text(-0.3, (bottom + top) / 2 + y_offset, MODALITY_NAMES[modality],
+                ha="right", va="center", fontsize=9, color=MODALITY_COLORS[modality])
+    for x in range(n_cells + 1):
+        ax.plot([x, x], [y_offset - 0.1, y_offset + height + 0.1], color="0.9", lw=0.5, zorder=0)
+
+    ax.set_xlim(-2.5, n_cells + 0.5)
+    words = remove_tags(graph.sentence).split()
+    y_words = y_offset - 0.3 if words_position == "bottom" else y_offset + height + 0.3
+    for k, word in enumerate(words):
+        ax.text(k + 0.5, y_words, word, ha="center", va="top" if words_position == "bottom" else "bottom",
+                fontsize=8)
+
+    # Overlap edges
+    if show_edges:
+        C = graph.distance_matrix()
+        for i in range(len(graph.cues)):
+            for j in range(i + 1, len(graph.cues)):
+                if C[i, j] == 0:
+                    ax.plot(*zip(pos[i], pos[j]), color="0.75", lw=0.8, zorder=1)
+
+    # Cues. A label that would overlap the previous one on the same row goes below the node.
+    char_width = 7.5 * 0.6 / 72 * ax.figure.dpi  # approximate width of a character, in pixels
+    pixels_per_word = ax.get_window_extent().width / (n_cells + 3)
+    label_end = {}  # right end of the last label above each row
+    for k in sorted(range(len(graph.cues)), key=lambda k: pos[k][0]):
+        cue = graph.cues[k]
+        x, y = pos[k]
+        color = MODALITY_COLORS[cue.modality]
+        ax.add_patch(plt.Rectangle((cue.onset, y - 0.18), max(cue.duration, 0.1), 0.36,
+                                   color=color, alpha=0.3, lw=0, zorder=2))
+        ax.scatter([x], [y], s=60, color=color, edgecolors="black", linewidths=0.6, zorder=3)
+        half_width = len(cue.value) * char_width / pixels_per_word / 2
+        if x - half_width < label_end.get(y, -np.inf):
+            ax.text(x, y - 0.22, cue.value, ha="center", va="top", fontsize=7.5, zorder=4)
+        else:
+            ax.text(x, y + 0.22, cue.value, ha="center", va="bottom", fontsize=7.5, zorder=4)
+            label_end[y] = x + half_width
+
+    ax.axis("off")
+    if title:
+        ax.set_title(title, fontsize=11)
+    return pos
+
+
+def draw_structure_matrix(graph, ax=None, cmap="viridis"):
+    """Heatmap of the structure matrix C (number of words between cues)."""
+    if ax is None:
+        _, ax = plt.subplots(figsize=(6, 5))
+    C = graph.distance_matrix()
+    labels = [cue.label for cue in graph.cues]
+    image = ax.imshow(C, cmap=cmap)
+    ax.set_xticks(range(len(labels)), labels, rotation=90, fontsize=8)
+    ax.set_yticks(range(len(labels)), labels, fontsize=8)
+    for i in range(len(labels)):
+        for j in range(len(labels)):
+            ax.text(j, i, f"{C[i, j]:g}", ha="center", va="center", fontsize=7,
+                    color="white" if C[i, j] < C.max() / 2 else "black")
+    plt.colorbar(image, ax=ax, label="gap (words)")
+    return ax
+
+
+def draw_coupling(graph1, graph2, transp, ax=None, thresh=0.1, distance=None):
+    """Draws two sentence graphs on timelines, one above the other, linked by
+    the transport plan ``transp`` (rows: nodes of graph1, columns: graph2).
+
+    Links whose mass is below ``thresh`` times the largest mass are hidden; the
+    others have a width and opacity proportional to their mass.
+    """
+    _, _, height2 = timeline_layout(graph2)
+    if ax is None:
+        width = max(8, 0.6 * max(graph1.n_words, graph2.n_words))
+        _, ax = plt.subplots(figsize=(width, 7))
+
+    offset1 = height2 + 2.5
+    pos2 = draw_sentence_graph(graph2, ax=ax, y_offset=0, words_position="bottom", show_edges=False)
+    pos1 = draw_sentence_graph(graph1, ax=ax, y_offset=offset1, words_position="top", show_edges=False)
+
+    mass_max = transp.max()
+    for i in range(transp.shape[0]):
+        for j in range(transp.shape[1]):
+            weight = transp[i, j] / mass_max
+            if weight >= thresh:
+                ax.plot(*zip(pos1[i], pos2[j]), color="black", lw=0.5 + 2.5 * weight,
+                        alpha=0.15 + 0.6 * weight, zorder=1)
+
+    n_cells = max(graph1.n_words, graph2.n_words, 1)
+    ax.set_xlim(-2.5, n_cells + 0.5)
+    if distance is not None:
+        ax.set_title(f"FGW distance = {distance:.4f}", fontsize=11, pad=18)
+    return ax
+
+
+def draw_coupling_matrix(graph1, graph2, transp, ax=None, cmap="Greys"):
+    """Heatmap of the transport plan, with the cue labels of both graphs."""
+    if ax is None:
+        _, ax = plt.subplots(figsize=(7, 6))
+    image = ax.imshow(transp, cmap=cmap)
+    ax.set_xticks(range(len(graph2.cues)), [cue.label for cue in graph2.cues], rotation=90, fontsize=8)
+    ax.set_yticks(range(len(graph1.cues)), [cue.label for cue in graph1.cues], fontsize=8)
+    ax.set_xlabel("graph 2")
+    ax.set_ylabel("graph 1")
+    plt.colorbar(image, ax=ax, label="transported mass")
+    return ax
