@@ -22,6 +22,11 @@ can tell the beginning of a sentence from its end (gaps alone cannot: they are
 unchanged when a sentence is reversed). Its feature is the embedding of
 START_DESCRIPTION, identical in all graphs, so start nodes match each other.
 
+Both costs of FGW lie in [0, 1]: C is divided by STRUCTURE_SCALE, and the
+embeddings are divided by the square root of the feature scale (the largest
+squared distance between two cue descriptions of the corpus, see
+``feature_scale``), so that the squared distances between features are at most 1.
+
 Time is measured in word units. The extent tau of a cue depends on its modality:
 
 * prosody and linguistic markers: 1 word;
@@ -32,7 +37,9 @@ The graphs are compared with the Fused Gromov-Wasserstein distance
 (see ``ot_distances.Fused_Gromov_Wasserstein_distance`` and ``FGW.py``).
 """
 
+import hashlib
 import io
+import json
 import math
 import re
 import warnings
@@ -57,6 +64,9 @@ from graph import NoAttrMatrix
 #%% Constants
 
 DEFAULT_GESTURE_FILE = Path(__file__).resolve().parent.parent / "data" / "gestures.csv"
+# Corpus whose cue descriptions define the feature scale, and where that scale is cached.
+CORPUS_DIR = Path(__file__).resolve().parent.parent / "data_with_text_tag"
+FEATURE_SCALE_FILE = Path(__file__).resolve().parent.parent / "data" / "feature_scale.json"
 
 # Average English speaking rate (about 160 words per minute), used to convert
 # gesture durations from seconds to words.
@@ -118,6 +128,48 @@ def load_gesture_table(path=DEFAULT_GESTURE_FILE):
             table["Name"], table["Description"], table["length in seconds"]
         )
     }
+
+
+def corpus_descriptions(corpus_dir=CORPUS_DIR, gesture_file=DEFAULT_GESTURE_FILE):
+    """All the node descriptions that can occur: the cues of the corpus, every
+    gesture of the gesture table and the start node."""
+    gesture_table = load_gesture_table(gesture_file)
+    descriptions = {START_DESCRIPTION} | {description for description, _ in gesture_table.values()}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # unknown gestures
+        for path in sorted(Path(corpus_dir).glob("*.csv")):
+            if path.stem.endswith("ratedbyFGW"):
+                continue
+            for text in pd.read_csv(path)["instruction_with_intention"].dropna():
+                descriptions |= {cue.description for cue in parse_cues(text, gesture_table)[0]}
+    return sorted(descriptions)
+
+
+def _model_key(emb):
+    """Identifies an embedding model by its embedding of START_DESCRIPTION."""
+    vector = np.round(np.asarray(emb.encode(START_DESCRIPTION), dtype=np.float64), 4)
+    return hashlib.sha1(vector.tobytes()).hexdigest()[:16]
+
+
+_feature_scales = {}  # in-memory cache, by id of the embedding model
+
+
+def feature_scale(emb, cache_file=FEATURE_SCALE_FILE):
+    """Largest squared Euclidean distance between the embeddings of two node
+    descriptions (see ``corpus_descriptions``). Computed once per model and
+    cached in ``cache_file``."""
+    if id(emb) in _feature_scales:
+        return _feature_scales[id(emb)]
+    key = _model_key(emb)
+    cache = json.loads(Path(cache_file).read_text()) if Path(cache_file).exists() else {}
+    if key not in cache:
+        X = np.array([emb.encode(d) for d in corpus_descriptions()], dtype=np.float64)
+        squared_norms = (X ** 2).sum(axis=1)
+        distances = squared_norms[:, None] + squared_norms[None, :] - 2 * X @ X.T
+        cache[key] = float(distances.max())
+        Path(cache_file).write_text(json.dumps(cache, indent=1))
+    _feature_scales[id(emb)] = cache[key]
+    return cache[key]
 
 
 def count_words(text):
@@ -229,6 +281,9 @@ class Graph():
         self.metadata = {}
         self.C = None
         self.name_struct_dist = None
+        # Features are already scaled (see feature_scale): ot_distances must not
+        # renormalize the feature cost of each pair.
+        self.prescaled_features = True
 
     @classmethod
     def from_sentence(cls, sentence, emb, **metadata):
@@ -249,7 +304,8 @@ class Graph():
         return graph
 
     def add_sentence(self, sentence, emb, **metadata):
-        """Fills the graph with the cues of ``sentence``. A graph holds a single sentence."""
+        """Fills the graph with the cues of ``sentence``. A graph holds a single sentence.
+        Node features are the embeddings divided by sqrt(feature_scale(emb))."""
         if self.sentence is not None:
             raise ValueError("This graph already holds a sentence, create a new Graph.")
 
@@ -258,6 +314,7 @@ class Graph():
         self.cues, self.n_words = parse_cues(sentence, load_gesture_table(self.gesture_file))
 
         nodes = self.node_cues()
+        norm = math.sqrt(feature_scale(emb))
         for node, cue in enumerate(nodes):
             self.nx_graph.add_node(
                 node,
@@ -266,7 +323,7 @@ class Graph():
                 description=cue.description,
                 onset=cue.onset,
                 duration=cue.duration,
-                attr_name=emb.encode(cue.description),
+                attr_name=np.asarray(emb.encode(cue.description)) / norm,
             )
         for i, cue_i in enumerate(nodes):
             for j in range(i + 1, len(nodes)):

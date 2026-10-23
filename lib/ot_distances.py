@@ -12,6 +12,11 @@ The following classes adapt the OT distances to Graph objects
 class BadParameters(Exception):
     pass
 
+def prescaled(graph1,graph2):
+    """True if the features of both graphs are already scaled to a common range
+    (graph_multimodalsentence), in which case the cost matrix is not renormalized."""
+    return getattr(graph1,'prescaled_features',False) and getattr(graph2,'prescaled_features',False)
+
 class Wasserstein_distance():
     """ Wasserstein_distance is a class used to compute the Wasserstein distance between features of the graphs.
     
@@ -57,7 +62,7 @@ class Wasserstein_distance():
             M=ot.dist(x1,x2,metric=f)
         else:
             M=ot.dist(x1,x2,metric=self.features_metric) 
-        if np.max(M)!=0:
+        if np.max(M)!=0 and not prescaled(graph1,graph2):
             M= M/np.max(M)
         self.M=M
 
@@ -157,7 +162,7 @@ class Fused_Gromov_Wasserstein_distance():
                 M=ot.dist(x1,x2,metric=f)
             else:
                 M=ot.dist(x1,x2,metric=self.features_metric)
-            if np.max(M)!=0:
+            if np.max(M)!=0 and not prescaled(graph1,graph2):
                 M= M/np.max(M)
             self.M=M
         else:
