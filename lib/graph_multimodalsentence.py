@@ -13,7 +13,8 @@ is turned into a graph G = (V, E, l_f, l_s) where
 * each node carries the embedding of a textual description of the cue
   (feature space, l_f);
 * the structure matrix C(i, j) is the number of words separating the two cues,
-  0 when they overlap in time (structure space, l_s).
+  0 when they overlap in time, divided by STRUCTURE_SCALE so that it lies in
+  [0, 1] like the feature cost (structure space, l_s).
 
 Every graph also has a "start" node, the last one, placed at word 0. Its row of
 C holds the position of each cue in the sentence, so that the structure cost
@@ -60,6 +61,11 @@ DEFAULT_GESTURE_FILE = Path(__file__).resolve().parent.parent / "data" / "gestur
 # Average English speaking rate (about 160 words per minute), used to convert
 # gesture durations from seconds to words.
 WORDS_PER_SECOND = 2.7
+
+# Largest gap between two cues of a sentence in the corpus (data_with_text_tag,
+# with WORDS_PER_SECOND = 2.7). The structure matrix is divided by it so that it
+# lies in [0, 1], like the feature cost, which is normalized by its maximum.
+STRUCTURE_SCALE = 50
 
 # Description of the start node, embedded like the cue descriptions.
 START_DESCRIPTION = "Start of the sentence"
@@ -311,8 +317,9 @@ class Graph():
         Parameters
         ----------
         method : 'temporal' or 'shortest_path'
-            - temporal: C(i, j) = number of words separating nodes i and j
-              (0 if they overlap). Requires a graph built from a sentence.
+            - temporal: C(i, j) = number of words separating cues i and j
+              (0 if they overlap), divided by STRUCTURE_SCALE. Requires a
+              graph built from a sentence.
             - shortest_path: weighted shortest path along the edges ('weight'
               attribute), for graphs built from an adjacency matrix (not for
               sentence graphs). 'shortest_path_weight' is accepted as an alias.
@@ -325,7 +332,7 @@ class Graph():
         if method == "temporal":
             if self.sentence is None:
                 raise ValueError("The temporal structure requires a graph built from a sentence.")
-            C = self.gap_matrix()
+            C = self.gap_matrix() / STRUCTURE_SCALE
         elif method in ("shortest_path", "shortest_path_weight"):
             if self.sentence is not None:
                 raise ValueError("Sentence graphs use method='temporal'.")
@@ -636,7 +643,7 @@ def draw_sentence_graph(graph, ax=None, y_offset=0, words_position="bottom", sho
 
 
 def draw_structure_matrix(graph, ax=None, cmap="viridis"):
-    """Heatmap of the structure matrix C (gaps between nodes, in words)."""
+    """Heatmap of the gaps between nodes, in words (C before scaling)."""
     if ax is None:
         _, ax = plt.subplots(figsize=(6, 5))
     C = graph.gap_matrix()
