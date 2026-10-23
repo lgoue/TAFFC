@@ -16,6 +16,12 @@ is turned into a graph G = (V, E, l_f, l_s) where
   0 when they overlap in time, divided by STRUCTURE_SCALE so that it lies in
   [0, 1] like the feature cost (structure space, l_s).
 
+Every graph also has a "start" node, the last one, placed at word 0. Its row of
+C holds the position of each cue in the sentence, so that the structure cost
+can tell the beginning of a sentence from its end (gaps alone cannot: they are
+unchanged when a sentence is reversed). Its feature is the embedding of
+START_DESCRIPTION, identical in all graphs, so start nodes match each other.
+
 Time is measured in word units. The extent tau of a cue depends on its modality:
 
 * prosody and linguistic markers: 1 word;
@@ -61,6 +67,9 @@ WORDS_PER_SECOND = 2.7
 # lies in [0, 1], like the feature cost, which is normalized by its maximum.
 STRUCTURE_SCALE = 50
 
+# Description of the start node, embedded like the cue descriptions.
+START_DESCRIPTION = "Start of the sentence"
+
 # {f: ...}, {g: ...}, {t: ...} or [prosody]
 TAG_PATTERN = re.compile(r"\{([fgt]):\s*([^}]*)\}|\[([^\]]*)\]")
 # Any other {...} block is not a cue and must not be counted as words.
@@ -69,7 +78,7 @@ OTHER_BRACES_PATTERN = re.compile(r"\{[^}]*\}")
 WORD_PATTERN = re.compile(r"\w+(?:['’]\w+)*")
 
 MODALITY_NAMES = {"f": "facial", "g": "gesture", "i": "prosody", "t": "linguistic"}
-MODALITY_COLORS = {"f": "tab:blue", "g": "tab:green", "i": "tab:orange", "t": "tab:purple"}
+MODALITY_COLORS = {"f": "tab:blue", "g": "tab:green", "i": "tab:orange", "t": "tab:purple", "start": "black"}
 
 
 #%% Parsing
@@ -92,7 +101,7 @@ class Cue:
 
     @property
     def label(self):
-        return f"{self.modality}:{self.value}"
+        return self.value if self.modality == "start" else f"{self.modality}:{self.value}"
 
 
 def _gesture_key(name):
@@ -196,11 +205,12 @@ class Graph():
     Attributes
     ----------
     nx_graph : networkx.Graph
-        Nodes are the cues. Node attributes: ``label``, ``modality``,
-        ``description``, ``onset``, ``duration`` and ``attr_name`` (embedding of
-        the description). Edges link every pair of cues with their temporal
-        ``gap`` in words.
+        Nodes 0 to n-1 are the cues, node n is the start of the sentence. Node
+        attributes: ``label``, ``modality``, ``description``, ``onset``,
+        ``duration`` and ``attr_name`` (embedding of the description). Edges
+        link every pair of nodes with their temporal ``gap`` in words.
     cues : list of Cue
+        The cues, without the start node.
     sentence : str
     n_words : int
     metadata : dict
@@ -247,7 +257,8 @@ class Graph():
         self.metadata = metadata
         self.cues, self.n_words = parse_cues(sentence, load_gesture_table(self.gesture_file))
 
-        for node, cue in enumerate(self.cues):
+        nodes = self.node_cues()
+        for node, cue in enumerate(nodes):
             self.nx_graph.add_node(
                 node,
                 label=cue.label,
@@ -257,10 +268,14 @@ class Graph():
                 duration=cue.duration,
                 attr_name=emb.encode(cue.description),
             )
-        for i, cue_i in enumerate(self.cues):
-            for j in range(i + 1, len(self.cues)):
-                self.nx_graph.add_edge(i, j, gap=temporal_gap(cue_i, self.cues[j]))
+        for i, cue_i in enumerate(nodes):
+            for j in range(i + 1, len(nodes)):
+                self.nx_graph.add_edge(i, j, gap=temporal_gap(cue_i, nodes[j]))
         self.C = None
+
+    def node_cues(self):
+        """The cues followed by the start node (a zero-length cue at word 0), in node order."""
+        return self.cues + [Cue("start", "start", 0, 0, START_DESCRIPTION)]
 
     def nodes(self):
         """Returns the nodes of the graph with their attributes."""
@@ -287,12 +302,13 @@ class Graph():
         return np.array(features)
 
     def gap_matrix(self):
-        """Number of words separating every pair of cues (0 if they overlap)."""
-        n = len(self.cues)
-        gaps = np.zeros((n, n))
-        for i in range(n):
-            for j in range(i + 1, n):
-                gaps[i, j] = gaps[j, i] = temporal_gap(self.cues[i], self.cues[j])
+        """Number of words separating every pair of nodes (0 if they overlap).
+        For the start node, this is the position of the cue in the sentence."""
+        nodes = self.node_cues()
+        gaps = np.zeros((len(nodes), len(nodes)))
+        for i in range(len(nodes)):
+            for j in range(i + 1, len(nodes)):
+                gaps[i, j] = gaps[j, i] = temporal_gap(nodes[i], nodes[j])
         return gaps
 
     def distance_matrix(self, method="temporal", force_recompute=False, **kwargs):
@@ -346,19 +362,20 @@ class Graph():
         if self.sentence is None:
             raise ValueError("The animation requires a graph built from a sentence.")
         words = remove_tags(self.sentence).split()
-        pos = nx.spring_layout(self.nx_graph, seed=seed)
-        labels = nx.get_node_attributes(self.nx_graph, "label")
+        cue_graph = self.nx_graph.subgraph(range(len(self.cues)))  # without the start node
+        pos = nx.spring_layout(cue_graph, seed=seed)
+        labels = nx.get_node_attributes(cue_graph, "label")
 
         frames = []
         for word, active in enumerate(self.generate_animation_timeline()):
             fig, ax = plt.subplots(figsize=(8, 6))
-            inactive = [k for k in self.nx_graph.nodes if k not in active]
-            nx.draw_networkx_nodes(self.nx_graph, pos, nodelist=inactive, ax=ax, node_size=1500, alpha=0.3,
+            inactive = [k for k in cue_graph.nodes if k not in active]
+            nx.draw_networkx_nodes(cue_graph, pos, nodelist=inactive, ax=ax, node_size=1500, alpha=0.3,
                                    node_color=[MODALITY_COLORS[self.cues[k].modality] for k in inactive])
-            nx.draw_networkx_nodes(self.nx_graph, pos, nodelist=active, ax=ax, node_size=1700,
+            nx.draw_networkx_nodes(cue_graph, pos, nodelist=active, ax=ax, node_size=1700,
                                    edgecolors="black",
                                    node_color=[MODALITY_COLORS[self.cues[k].modality] for k in active])
-            nx.draw_networkx_labels(self.nx_graph, pos, labels=labels, ax=ax, font_size=9)
+            nx.draw_networkx_labels(cue_graph, pos, labels=labels, ax=ax, font_size=9)
 
             # Sentence with the current word in red.
             text = ax.text(0, 1.02, " ".join(words[:word]) + " ", transform=ax.transAxes, fontsize=11)
@@ -507,6 +524,9 @@ def draw_transp(G1, G2, transp, shiftx=1, shifty=0, thresh=0.09, swipy=False, sw
 # Lanes from top to bottom.
 MODALITY_ORDER = ["f", "g", "i", "t"]
 LANE_GAP = 0.6
+START_X = -0.5        # x of the start node, just before the first word
+LANE_LABEL_X = -1.1   # right end of the lane names
+X_MIN = -3.2
 
 
 def timeline_layout(graph):
@@ -554,7 +574,8 @@ def draw_sentence_graph(graph, ax=None, y_offset=0, words_position="bottom", sho
 
     Each cue is a node in the lane of its modality, with a bar showing its
     extent in words. The words of the transcript are written along the time
-    axis. With ``show_edges``, cues that overlap in time (C = 0) are linked.
+    axis, and the start node is the black diamond before the first word. With
+    ``show_edges``, nodes that overlap in time (C = 0) are linked.
 
     Returns
     -------
@@ -567,17 +588,19 @@ def draw_sentence_graph(graph, ax=None, y_offset=0, words_position="bottom", sho
 
     pos, lanes, height = timeline_layout(graph)
     pos = {k: (x, y + y_offset) for k, (x, y) in pos.items()}
+    start = len(graph.cues)
+    pos[start] = (START_X, y_offset + height / 2)
     n_cells = max(graph.n_words, max((cue.end for cue in graph.cues), default=0), 1)
 
     # Lanes and word grid
     for modality, (bottom, top) in lanes.items():
         ax.axhspan(bottom + y_offset - 0.1, top + y_offset + 0.1, color=MODALITY_COLORS[modality], alpha=0.06, lw=0)
-        ax.text(-0.3, (bottom + top) / 2 + y_offset, MODALITY_NAMES[modality],
+        ax.text(LANE_LABEL_X, (bottom + top) / 2 + y_offset, MODALITY_NAMES[modality],
                 ha="right", va="center", fontsize=9, color=MODALITY_COLORS[modality])
     for x in range(n_cells + 1):
         ax.plot([x, x], [y_offset - 0.1, y_offset + height + 0.1], color="0.9", lw=0.5, zorder=0)
 
-    ax.set_xlim(-2.5, n_cells + 0.5)
+    ax.set_xlim(X_MIN, n_cells + 0.5)
     words = remove_tags(graph.sentence).split()
     y_words = y_offset - 0.3 if words_position == "bottom" else y_offset + height + 0.3
     for k, word in enumerate(words):
@@ -587,14 +610,14 @@ def draw_sentence_graph(graph, ax=None, y_offset=0, words_position="bottom", sho
     # Overlap edges
     if show_edges:
         C = graph.distance_matrix()
-        for i in range(len(graph.cues)):
-            for j in range(i + 1, len(graph.cues)):
+        for i in range(len(C)):
+            for j in range(i + 1, len(C)):
                 if C[i, j] == 0:
                     ax.plot(*zip(pos[i], pos[j]), color="0.75", lw=0.8, zorder=1)
 
     # Cues. A label that would overlap the previous one on the same row goes below the node.
     char_width = 7.5 * 0.6 / 72 * ax.figure.dpi  # approximate width of a character, in pixels
-    pixels_per_word = ax.get_window_extent().width / (n_cells + 3)
+    pixels_per_word = ax.get_window_extent().width / (n_cells + 0.5 - X_MIN)
     label_end = {}  # right end of the last label above each row
     for k in sorted(range(len(graph.cues)), key=lambda k: pos[k][0]):
         cue = graph.cues[k]
@@ -610,6 +633,9 @@ def draw_sentence_graph(graph, ax=None, y_offset=0, words_position="bottom", sho
             ax.text(x, y + 0.22, cue.value, ha="center", va="bottom", fontsize=7.5, zorder=4)
             label_end[y] = x + half_width
 
+    ax.scatter([pos[start][0]], [pos[start][1]], s=70, marker="D", color="black", zorder=3)
+    ax.text(pos[start][0], pos[start][1] - 0.25, "start", ha="center", va="top", fontsize=7.5, zorder=4)
+
     ax.axis("off")
     if title:
         ax.set_title(title, fontsize=11)
@@ -617,11 +643,11 @@ def draw_sentence_graph(graph, ax=None, y_offset=0, words_position="bottom", sho
 
 
 def draw_structure_matrix(graph, ax=None, cmap="viridis"):
-    """Heatmap of the gaps between cues, in words (C before scaling)."""
+    """Heatmap of the gaps between nodes, in words (C before scaling)."""
     if ax is None:
         _, ax = plt.subplots(figsize=(6, 5))
     C = graph.gap_matrix()
-    labels = [cue.label for cue in graph.cues]
+    labels = [cue.label for cue in graph.node_cues()]
     image = ax.imshow(C, cmap=cmap)
     ax.set_xticks(range(len(labels)), labels, rotation=90, fontsize=8)
     ax.set_yticks(range(len(labels)), labels, fontsize=8)
@@ -658,19 +684,21 @@ def draw_coupling(graph1, graph2, transp, ax=None, thresh=0.1, distance=None):
                         alpha=0.15 + 0.6 * weight, zorder=1)
 
     n_cells = max(graph1.n_words, graph2.n_words, 1)
-    ax.set_xlim(-2.5, n_cells + 0.5)
+    ax.set_xlim(X_MIN, n_cells + 0.5)
     if distance is not None:
         ax.set_title(f"FGW distance = {distance:.4f}", fontsize=11, pad=18)
     return ax
 
 
 def draw_coupling_matrix(graph1, graph2, transp, ax=None, cmap="Greys"):
-    """Heatmap of the transport plan, with the cue labels of both graphs."""
+    """Heatmap of the transport plan, with the node labels of both graphs."""
     if ax is None:
         _, ax = plt.subplots(figsize=(7, 6))
     image = ax.imshow(transp, cmap=cmap)
-    ax.set_xticks(range(len(graph2.cues)), [cue.label for cue in graph2.cues], rotation=90, fontsize=8)
-    ax.set_yticks(range(len(graph1.cues)), [cue.label for cue in graph1.cues], fontsize=8)
+    labels1 = [cue.label for cue in graph1.node_cues()]
+    labels2 = [cue.label for cue in graph2.node_cues()]
+    ax.set_xticks(range(len(labels2)), labels2, rotation=90, fontsize=8)
+    ax.set_yticks(range(len(labels1)), labels1, fontsize=8)
     ax.set_xlabel("graph 2")
     ax.set_ylabel("graph 1")
     plt.colorbar(image, ax=ax, label="transported mass")
