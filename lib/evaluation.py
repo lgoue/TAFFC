@@ -22,7 +22,33 @@ N_BOOTSTRAP = 1000                   # resamples for the confidence interval of 
 PREFIX = "generated_instructions_with_intention_explanation_"
 
 
-def load_transcripts(data_dir, dimensions, reference="instructed", perceived_file=None,
+def load_ratings(ratings_file):
+    """Individual ratings of the participants: csv with one row per rating and
+    columns id (transcript id, <condition>#<row>), dimension, rater, rating
+    (Low / Medium / High)."""
+    ratings = pd.read_csv(ratings_file)[["id", "dimension", "rater", "rating"]]
+    unknown = set(ratings["rating"]) - set(LEVELS)
+    assert not unknown, f"ratings must be in {LEVELS}, found {unknown}"
+    return ratings
+
+
+def consensus(levels):
+    """Median of ordered levels (indices). With an even number of ratings, a
+    median halfway between two levels (Low-Medium or Medium-High) gives Medium."""
+    median = np.median(levels)
+    return 1 if median % 1 else int(median)
+
+
+def perceived_levels(ratings):
+    """Perceived level of each transcript: median of its ratings."""
+    index = {level: i for i, level in enumerate(LEVELS)}
+    perceived = (ratings.assign(rating=ratings["rating"].map(index))
+                 .groupby(["id", "dimension"])["rating"]
+                 .agg(lambda r: LEVELS[consensus(r.to_numpy())]))
+    return perceived.rename("perceived").reset_index()
+
+
+def load_transcripts(data_dir, dimensions, reference="instructed", ratings_file=None,
                      n_per_level=None, seed=0):
     """Transcripts of all ``full_*`` conditions with their reference level.
 
@@ -32,8 +58,8 @@ def load_transcripts(data_dir, dimensions, reference="instructed", perceived_fil
     Parameters
     ----------
     reference : "instructed" or "perceived"
-        For "perceived", ``perceived_file`` is a csv with columns id, dimension,
-        perceived (Low / Medium / High); only the transcripts it lists are kept.
+        For "perceived", the level is the median of the ratings of
+        ``ratings_file`` (see ``load_ratings``); only rated transcripts are kept.
     n_per_level : int, optional
         Keep at most this many transcripts per dimension and level.
 
@@ -63,8 +89,7 @@ def load_transcripts(data_dir, dimensions, reference="instructed", perceived_fil
     df = df[df["instructed"].isin(LEVELS)]
 
     if reference == "perceived":
-        perceived = pd.read_csv(perceived_file)
-        df = df.merge(perceived[["id", "dimension", "perceived"]], on=["id", "dimension"])
+        df = df.merge(perceived_levels(load_ratings(ratings_file)), on=["id", "dimension"])
     df["level"] = df[reference]
     df = df[df["level"].isin(LEVELS)]
 
@@ -167,6 +192,59 @@ def kappa_with_ci(pred, n_bootstrap=N_BOOTSTRAP, seed=0):
     return {"kappa": quadratic_kappa(true, predicted), "kappa_ci_low": low, "kappa_ci_high": high}
 
 
+def human_agreement(ratings, dimension, n_bootstrap=N_BOOTSTRAP, seed=0):
+    """Agreement between human raters: each rating is compared with the median of
+    the other raters of the same transcript (leave-one-rater-out), with the
+    quadratic-weighted kappa. The 95% confidence interval resamples transcripts
+    (all the ratings of a transcript stay together). Transcripts with a single
+    rating are skipped."""
+    index = {level: i for i, level in enumerate(LEVELS)}
+    pairs = []  # per transcript: (ratings, medians of the other raters)
+    for _, group in ratings[ratings["dimension"] == dimension].groupby("id"):
+        values = group["rating"].map(index).to_numpy()
+        if len(values) < 2:
+            continue
+        others = [consensus(np.delete(values, r)) for r in range(len(values))]
+        pairs.append((values, np.array(others)))
+
+    def kappa(selection):
+        return quadratic_kappa(np.concatenate([pairs[i][0] for i in selection]),
+                               np.concatenate([pairs[i][1] for i in selection]))
+
+    rng = np.random.default_rng(seed)
+    resamples = [kappa(rng.integers(0, len(pairs), len(pairs))) for _ in range(n_bootstrap)]
+    low, high = np.nanpercentile(resamples, [2.5, 97.5])
+    return {"kappa": kappa(range(len(pairs))), "kappa_ci_low": low, "kappa_ci_high": high,
+            "n_transcripts": len(pairs), "n_ratings": int(sum(len(v) for v, _ in pairs))}
+
+
+def agreement_table(ratings, predictions_by_method, dimensions):
+    """AGREEMENT (quadratic-weighted Cohen's kappa, 95% CI) with the human raters.
+
+    The first row compares each rater with the other raters; the others compare
+    the predictions of each method with the perceived level (median of the raters).
+
+    Parameters
+    ----------
+    predictions_by_method : dict {method: {(dimension, setting): predictions}},
+        predictions made with REFERENCE = "perceived" (column true = perceived level).
+    """
+    rows = []
+    for dimension in dimensions:
+        rows.append({"comparison": "Human raters vs human", "dimension": dimension,
+                     **human_agreement(ratings, dimension)})
+        for method, predictions in predictions_by_method.items():
+            for (dim, setting), pred in predictions.items():
+                if dim == dimension:
+                    rows.append({"comparison": f"{method} ({setting}) vs human", "dimension": dimension,
+                                 **kappa_with_ci(pred), "n_transcripts": len(pred)})
+    table = pd.DataFrame(rows)
+    table["agreement"] = [f"{k:.2f} [{lo:.2f}, {hi:.2f}]" for k, lo, hi in
+                          zip(table["kappa"], table["kappa_ci_low"], table["kappa_ci_high"])]
+    return table.pivot(index="comparison", columns="dimension", values="agreement").reindex(
+        list(dict.fromkeys(table["comparison"])))
+
+
 def cluster_scores(pred):
     """Label-free agreement between clusters and reference levels."""
     return {"ARI": adjusted_rand_score(pred["true"], pred["cluster"]),
@@ -197,6 +275,18 @@ def summarize(results):
     per_fold = results[results["fold"] != "all"]
     return (per_fold.groupby(["dimension", "setting"])[["accuracy", "macro_f1", "kappa"]]
             .agg(["mean", "std"]).round(3))
+
+
+def load_predictions(output_dir, prefix, reference, dimensions, settings=("few-shot", "zero-shot")):
+    """Predictions saved by a method notebook, as {(dimension, setting): DataFrame};
+    missing files are skipped."""
+    predictions = {}
+    for dimension in dimensions:
+        for setting in settings:
+            path = os.path.join(output_dir, f"{prefix}_predictions_{dimension}_{setting}_{reference}.csv")
+            if os.path.exists(path):
+                predictions[(dimension, setting)] = pd.read_csv(path)
+    return predictions
 
 
 def plot_confusion(predictions, reference, path=None):
