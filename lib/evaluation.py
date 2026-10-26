@@ -308,3 +308,52 @@ def plot_confusion(predictions, reference, path=None):
     if path:
         fig.savefig(path, dpi=300)
     return fig
+
+
+def separation(D, labels, level_a, level_b, n_permutations=10000, seed=0):
+    """Separation between two levels in a distance matrix.
+
+    Delta = mean distance between transcripts of the two levels minus mean
+    distance between transcripts of the same level (pairs within level_a or
+    within level_b). The one-sided p-value is the share of label permutations
+    (within the transcripts of the two levels) giving a Delta at least as large.
+
+    Returns
+    -------
+    delta, p_value, n_a, n_b
+    """
+    labels = np.asarray(labels)
+    keep = (labels == level_a) | (labels == level_b)
+    D = np.asarray(D)[np.ix_(keep, keep)]
+    z = (labels[keep] == level_a).astype(float)
+    n, n_a = len(z), int(z.sum())
+    n_b = n - n_a
+    n_between = n_a * n_b
+    n_within = n_a * (n_a - 1) / 2 + n_b * (n_b - 1) / 2
+    total = D[np.triu_indices(n, 1)].sum()
+    row_sums = D.sum(axis=1)
+
+    def deltas(Z):
+        # between-level sum of each row of Z: z'D(1 - z) = z'D1 - z'Dz
+        between = Z @ row_sums - np.einsum("pi,ij,pj->p", Z, D, Z)
+        return between / n_between - (total - between) / n_within
+
+    observed = deltas(z[None, :])[0]
+    rng = np.random.default_rng(seed)
+    permuted = []
+    for start in range(0, n_permutations, 1000):  # by blocks, to bound memory
+        Z = np.array([rng.permutation(z) for _ in range(min(1000, n_permutations - start))])
+        permuted.append(deltas(Z))
+    permuted = np.concatenate(permuted)
+    p_value = (1 + np.sum(permuted >= observed - 1e-12)) / (1 + n_permutations)
+    return observed, p_value, n_a, n_b
+
+
+def holm(p_values):
+    """Holm-Bonferroni adjusted p-values."""
+    p_values = np.asarray(p_values, dtype=float)
+    order = np.argsort(p_values)
+    adjusted = np.maximum.accumulate((len(p_values) - np.arange(len(p_values))) * p_values[order])
+    result = np.empty_like(p_values)
+    result[order] = np.minimum(adjusted, 1)
+    return result
