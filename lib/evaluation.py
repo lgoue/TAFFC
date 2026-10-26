@@ -17,7 +17,8 @@ from sklearn.metrics import (ConfusionMatrixDisplay, accuracy_score, adjusted_mu
                              adjusted_rand_score, confusion_matrix, f1_score)
 from sklearn.model_selection import StratifiedKFold
 
-LEVELS = ["Low", "Medium", "High"]
+LEVELS = ["Low", "Medium", "High"]  # ordered: the agreement is weighted by the distance between levels
+N_BOOTSTRAP = 1000                   # resamples for the confidence interval of kappa
 PREFIX = "generated_instructions_with_intention_explanation_"
 
 
@@ -134,9 +135,36 @@ def map_clusters(clusters, true):
 
 
 def scores(pred):
-    """Accuracy and macro-F1 of a DataFrame with columns true and pred."""
+    """Accuracy, macro-F1 and quadratic-weighted kappa of a DataFrame with
+    columns true and pred."""
+    index = {level: i for i, level in enumerate(LEVELS)}
     return {"accuracy": accuracy_score(pred["true"], pred["pred"]),
-            "macro_f1": f1_score(pred["true"], pred["pred"], labels=LEVELS, average="macro")}
+            "macro_f1": f1_score(pred["true"], pred["pred"], labels=LEVELS, average="macro"),
+            "kappa": quadratic_kappa(pred["true"].map(index).to_numpy(), pred["pred"].map(index).to_numpy())}
+
+
+def quadratic_kappa(true, pred):
+    """Quadratic-weighted Cohen's kappa between two arrays of level indices."""
+    k = len(LEVELS)
+    observed = np.bincount(true * k + pred, minlength=k * k).reshape(k, k)
+    expected = np.outer(observed.sum(axis=1), observed.sum(axis=0)) / observed.sum()
+    weights = np.subtract.outer(np.arange(k), np.arange(k)) ** 2 / (k - 1) ** 2
+    return 1 - (weights * observed).sum() / (weights * expected).sum()
+
+
+def kappa_with_ci(pred, n_bootstrap=N_BOOTSTRAP, seed=0):
+    """Quadratic-weighted Cohen's kappa against the reference levels, with a 95%
+    percentile bootstrap confidence interval (transcripts resampled with replacement)."""
+    index = {level: i for i, level in enumerate(LEVELS)}
+    true = pred["true"].map(index).to_numpy()
+    predicted = pred["pred"].map(index).to_numpy()
+    rng = np.random.default_rng(seed)
+    resamples = []
+    for _ in range(n_bootstrap):
+        sample = rng.integers(0, len(true), len(true))
+        resamples.append(quadratic_kappa(true[sample], predicted[sample]))
+    low, high = np.nanpercentile(resamples, [2.5, 97.5])
+    return {"kappa": quadratic_kappa(true, predicted), "kappa_ci_low": low, "kappa_ci_high": high}
 
 
 def cluster_scores(pred):
@@ -147,7 +175,8 @@ def cluster_scores(pred):
 
 def evaluate(predictions, method, reference):
     """Score table from {(dimension, setting): predictions}. Few-shot predictions
-    are scored per fold and on all folds pooled."""
+    are scored per fold and on all folds pooled. Pooled rows also have the 95%
+    bootstrap confidence interval of the quadratic-weighted kappa."""
     records = []
     for (dimension, setting), pred in predictions.items():
         if "fold" in pred.columns:
@@ -156,7 +185,7 @@ def evaluate(predictions, method, reference):
                                 **scores(pred_fold)})
         extra = cluster_scores(pred) if "cluster" in pred.columns else {}
         records.append({"dimension": dimension, "setting": setting, "fold": "all",
-                        **scores(pred), **extra})
+                        **scores(pred), **kappa_with_ci(pred), **extra})
     results = pd.DataFrame(records)
     results.insert(0, "method", method)
     results.insert(1, "reference", reference)
@@ -166,7 +195,7 @@ def evaluate(predictions, method, reference):
 def summarize(results):
     """Few-shot: mean and standard deviation over folds."""
     per_fold = results[results["fold"] != "all"]
-    return (per_fold.groupby(["dimension", "setting"])[["accuracy", "macro_f1"]]
+    return (per_fold.groupby(["dimension", "setting"])[["accuracy", "macro_f1", "kappa"]]
             .agg(["mean", "std"]).round(3))
 
 
