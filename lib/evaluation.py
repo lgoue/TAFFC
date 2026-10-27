@@ -357,3 +357,18 @@ def holm(p_values):
     result = np.empty_like(p_values)
     result[order] = np.minimum(adjusted, 1)
     return result
+
+
+def spearman_with_ci(x, y, n_bootstrap=N_BOOTSTRAP, seed=0):
+    """Spearman correlation with its p-value and a 95% percentile bootstrap
+    confidence interval (pairs resampled with replacement)."""
+    from scipy.stats import spearmanr
+    x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+    rho, p_value = spearmanr(x, y)
+    rng = np.random.default_rng(seed)
+    resamples = []
+    for _ in range(n_bootstrap):
+        sample = rng.integers(0, len(x), len(x))
+        resamples.append(spearmanr(x[sample], y[sample])[0])
+    low, high = np.nanpercentile(resamples, [2.5, 97.5])
+    return {"rho": rho, "rho_ci_low": low, "rho_ci_high": high, "p": p_value, "n": len(x)}
