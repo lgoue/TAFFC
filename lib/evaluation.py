@@ -58,16 +58,24 @@ def to_level(value):
     return text.capitalize() if text.capitalize() in LEVELS else None
 
 
-def load_labeled_transcripts(path, text_column="Transcript", label_column="ability_label_name"):
-    """Transcripts labeled by humans: one row per transcript, its text and its level.
-    Each transcript gets an id ``row<k>`` (its row in the file); rows whose label
-    is not a level are dropped and reported."""
+def load_labeled_transcripts(path, text_column="Transcript", label_column="ability_label_name",
+                             reference_column=None):
+    """Transcripts labeled by humans: one row per transcript, its text and its level
+    (and, with ``reference_column``, its reference level in a column ``reference``).
+    Each transcript gets an id ``row<k>`` (its row in the file); rows whose labels
+    are not levels are dropped and reported."""
     data = pd.read_csv(path)
     df = pd.DataFrame({"id": [f"row{k}" for k in data.index],
                        "text": data[text_column],
                        "raw_label": data[label_column],
                        "level": data[label_column].map(to_level)})
     invalid = df["level"].isna() | df["text"].isna()
+    if reference_column is not None:
+        df["reference"] = data[reference_column].map(to_level)
+        if df["reference"].isna().any():
+            print(f"{df['reference'].isna().sum()} rows without a Low/Medium/High reference level are dropped:",
+                  sorted(data.loc[df["reference"].isna(), reference_column].astype(str).unique()))
+        invalid |= df["reference"].isna()
     if invalid.any():
         print(f"{invalid.sum()} rows without a text or a Low/Medium/High label are dropped:",
               sorted(df.loc[invalid, "raw_label"].astype(str).unique()))
@@ -125,6 +133,40 @@ def load_transcripts(data_dir, dimensions, reference="instructed", ratings_file=
     return df.reset_index(drop=True)
 
 
+def draw_examples(folds, labels, m=10, seed=0):
+    """For each fold, ``m`` examples per level (all with ``m=None``) drawn from
+    the other folds, with the levels given by ``labels`` (aligned with ``folds``).
+
+    Returns
+    -------
+    examples : DataFrame (fold, level, id)
+    """
+    folds = folds.assign(label=np.asarray(labels))
+    rng = np.random.default_rng(seed)
+    rows = []
+    for fold in sorted(folds["fold"].unique()):
+        train = folds[folds["fold"] != fold]
+        for level in LEVELS:
+            candidates = train.loc[train["label"] == level, "id"].to_numpy()
+            if m is not None and len(candidates) < m:
+                raise ValueError(f"fold {fold}: only {len(candidates)} {level} transcripts in the other folds, "
+                                 f"fewer than m = {m}; lower m or the number of folds")
+            chosen = candidates if m is None else rng.choice(candidates, m, replace=False)
+            rows += [{"fold": fold, "level": level, "id": i} for i in chosen]
+    return pd.DataFrame(rows)
+
+
+def load_or_create_examples(folds, labels, name, split_dir, m=10, seed=0):
+    """``draw_examples`` on existing folds, saved as ``examples_<name>_m<m>.csv``
+    the first time and reloaded afterwards."""
+    path = os.path.join(split_dir, f"examples_{name}_m{'all' if m is None else m}.csv")
+    if os.path.exists(path):
+        return pd.read_csv(path)
+    examples = draw_examples(folds, labels, m, seed)
+    examples.to_csv(path, index=False)
+    return examples
+
+
 def load_or_create_split(data, dimension, reference, split_dir, m=10, n_folds=5, seed=0):
     """Stratified folds and few-shot examples of one dimension.
 
@@ -152,18 +194,7 @@ def load_or_create_split(data, dimension, reference, split_dir, m=10, n_folds=5,
         folds.loc[folds.index[test], "fold"] = fold
     folds["fold"] = folds["fold"].astype(int)
 
-    rng = np.random.default_rng(seed)
-    rows = []
-    for fold in range(n_folds):
-        train = folds[folds["fold"] != fold]
-        for level in LEVELS:
-            candidates = train.loc[train["level"] == level, "id"].to_numpy()
-            if m is not None and len(candidates) < m:
-                raise ValueError(f"fold {fold}: only {len(candidates)} {level} transcripts in the other folds, "
-                                 f"fewer than m = {m}; lower m or the number of folds")
-            chosen = candidates if m is None else rng.choice(candidates, m, replace=False)
-            rows += [{"fold": fold, "level": level, "id": i} for i in chosen]
-    examples = pd.DataFrame(rows)
+    examples = draw_examples(folds, folds["level"], m, seed)
 
     folds.to_csv(folds_path, index=False)
     examples.to_csv(examples_path, index=False)
