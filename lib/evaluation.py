@@ -48,6 +48,32 @@ def perceived_levels(ratings):
     return perceived.rename("perceived").reset_index()
 
 
+def to_level(value):
+    """Low / Medium / High from a label in any case (or 1 / 2 / 3), else None."""
+    if pd.isna(value):
+        return None
+    text = str(value).strip()
+    if text in {"1", "2", "3", "1.0", "2.0", "3.0"}:
+        return LEVELS[int(float(text)) - 1]
+    return text.capitalize() if text.capitalize() in LEVELS else None
+
+
+def load_labeled_transcripts(path, text_column="Transcript", label_column="ability_label_name"):
+    """Transcripts labeled by humans: one row per transcript, its text and its level.
+    Each transcript gets an id ``row<k>`` (its row in the file); rows whose label
+    is not a level are dropped and reported."""
+    data = pd.read_csv(path)
+    df = pd.DataFrame({"id": [f"row{k}" for k in data.index],
+                       "text": data[text_column],
+                       "raw_label": data[label_column],
+                       "level": data[label_column].map(to_level)})
+    invalid = df["level"].isna() | df["text"].isna()
+    if invalid.any():
+        print(f"{invalid.sum()} rows without a text or a Low/Medium/High label are dropped:",
+              sorted(df.loc[invalid, "raw_label"].astype(str).unique()))
+    return df[~invalid].drop(columns="raw_label").reset_index(drop=True)
+
+
 def load_transcripts(data_dir, dimensions, reference="instructed", ratings_file=None,
                      n_per_level=None, seed=0):
     """Transcripts of all ``full_*`` conditions with their reference level.
@@ -102,9 +128,10 @@ def load_transcripts(data_dir, dimensions, reference="instructed", ratings_file=
 def load_or_create_split(data, dimension, reference, split_dir, m=10, n_folds=5, seed=0):
     """Stratified folds and few-shot examples of one dimension.
 
-    For each fold, ``m`` examples per level are drawn from the other folds; the
-    transcripts of the fold are then classified with them. The split is saved
-    in ``split_dir`` the first time and reloaded afterwards.
+    For each fold, ``m`` examples per level are drawn from the other folds (all
+    of them with ``m=None``); the transcripts of the fold are then classified
+    with them. The split is saved in ``split_dir`` the first time and reloaded
+    afterwards.
 
     Returns
     -------
@@ -113,7 +140,7 @@ def load_or_create_split(data, dimension, reference, split_dir, m=10, n_folds=5,
     """
     os.makedirs(split_dir, exist_ok=True)
     folds_path = os.path.join(split_dir, f"folds_{dimension}_{reference}.csv")
-    examples_path = os.path.join(split_dir, f"examples_{dimension}_{reference}_m{m}.csv")
+    examples_path = os.path.join(split_dir, f"examples_{dimension}_{reference}_m{'all' if m is None else m}.csv")
     if os.path.exists(folds_path) and os.path.exists(examples_path):
         folds, examples = pd.read_csv(folds_path), pd.read_csv(examples_path)
         assert set(folds["id"]) == set(data["id"]), f"{folds_path} was made on other data"
@@ -130,7 +157,11 @@ def load_or_create_split(data, dimension, reference, split_dir, m=10, n_folds=5,
     for fold in range(n_folds):
         train = folds[folds["fold"] != fold]
         for level in LEVELS:
-            chosen = rng.choice(train.loc[train["level"] == level, "id"].to_numpy(), m, replace=False)
+            candidates = train.loc[train["level"] == level, "id"].to_numpy()
+            if m is not None and len(candidates) < m:
+                raise ValueError(f"fold {fold}: only {len(candidates)} {level} transcripts in the other folds, "
+                                 f"fewer than m = {m}; lower m or the number of folds")
+            chosen = candidates if m is None else rng.choice(candidates, m, replace=False)
             rows += [{"fold": fold, "level": level, "id": i} for i in chosen]
     examples = pd.DataFrame(rows)
 
