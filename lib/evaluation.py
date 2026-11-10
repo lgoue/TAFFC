@@ -434,3 +434,29 @@ def spearman_with_ci(x, y, n_bootstrap=N_BOOTSTRAP, seed=0):
         resamples.append(spearmanr(x[sample], y[sample])[0])
     low, high = np.nanpercentile(resamples, [2.5, 97.5])
     return {"rho": rho, "rho_ci_low": low, "rho_ci_high": high, "p": p_value, "n": len(x)}
+
+
+def load_or_create_pool_examples(pool, labels, name, split_dir, m=None, seed=0):
+    """Examples taken from a fixed pool of transcripts instead of the other folds:
+    all of them (``m=None``) or ``m`` per level drawn at random, with the levels
+    given by ``labels`` (aligned with ``pool``, a Series or list of ids). Saved as
+    ``examples_<name>_m<m>.csv`` (fold 0) the first time and reloaded afterwards."""
+    os.makedirs(split_dir, exist_ok=True)
+    path = os.path.join(split_dir, f"examples_{name}_m{'all' if m is None else m}.csv")
+    if os.path.exists(path):
+        examples = pd.read_csv(path)
+        assert set(examples["id"]) <= set(pool), f"{path} was made on other data"
+        return examples
+    pool = pd.DataFrame({"id": np.asarray(pool), "label": np.asarray(labels)})
+    rng = np.random.default_rng(seed)
+    rows = []
+    for level in LEVELS:
+        candidates = pool.loc[pool["label"] == level, "id"].to_numpy()
+        if len(candidates) == 0 or (m is not None and len(candidates) < m):
+            raise ValueError(f"only {len(candidates)} {level} transcripts among the examples"
+                             + (f", fewer than m = {m}; lower M or use M = None" if m is not None else ""))
+        chosen = candidates if m is None else rng.choice(candidates, m, replace=False)
+        rows += [{"fold": 0, "level": level, "id": i} for i in chosen]
+    examples = pd.DataFrame(rows)
+    examples.to_csv(path, index=False)
+    return examples
