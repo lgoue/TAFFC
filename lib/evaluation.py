@@ -148,10 +148,9 @@ def draw_examples(folds, labels, m=10, seed=0):
         train = folds[folds["fold"] != fold]
         for level in LEVELS:
             candidates = train.loc[train["label"] == level, "id"].to_numpy()
-            if len(candidates) == 0 or (m is not None and len(candidates) < m):
-                raise ValueError(f"fold {fold}: only {len(candidates)} {level} transcripts in the other folds"
-                                 + (f", fewer than m = {m}" if m is not None else "")
-                                 + "; lower m or the number of folds")
+            if m is not None and len(candidates) < m:
+                raise ValueError(f"fold {fold}: only {len(candidates)} {level} transcripts in the other folds, "
+                                 f"fewer than m = {m}; lower m or the number of folds")
             chosen = candidates if m is None else rng.choice(candidates, m, replace=False)
             rows += [{"fold": fold, "level": level, "id": i} for i in chosen]
     return pd.DataFrame(rows)
