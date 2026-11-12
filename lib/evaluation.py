@@ -161,7 +161,11 @@ def load_or_create_examples(folds, labels, name, split_dir, m=10, seed=0):
     the first time and reloaded afterwards."""
     path = os.path.join(split_dir, f"examples_{name}_m{'all' if m is None else m}.csv")
     if os.path.exists(path):
-        return pd.read_csv(path)
+        examples = pd.read_csv(path)
+        current = dict(zip(folds["id"], np.asarray(labels)))
+        if all(current.get(i) == level for i, level in zip(examples["id"], examples["level"])):
+            return examples
+        print(f"{path}: the saved levels differ from the current labels; the examples are drawn again")
     examples = draw_examples(folds, labels, m, seed)
     examples.to_csv(path, index=False)
     return examples
@@ -186,7 +190,12 @@ def load_or_create_split(data, dimension, reference, split_dir, m=10, n_folds=5,
     if os.path.exists(folds_path) and os.path.exists(examples_path):
         folds, examples = pd.read_csv(folds_path), pd.read_csv(examples_path)
         assert set(folds["id"]) == set(data["id"]), f"{folds_path} was made on other data"
-        return folds, examples
+        # the ids are row numbers: also check that the saved levels are still the current ones
+        current = dict(zip(data["id"], data["level"]))
+        if all(current[i] == level for i, level in zip(folds["id"], folds["level"])) and \
+                all(current[i] == level for i, level in zip(examples["id"], examples["level"])):
+            return folds, examples
+        print(f"{folds_path}: the saved levels differ from the current labels; the split is made again")
 
     folds = data[["id", "level"]].copy()
     skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
