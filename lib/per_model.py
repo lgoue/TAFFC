@@ -357,6 +357,84 @@ def respect(df, labels, generators, main, main_scores, n_bootstrap, seed, method
     return table, tests
 
 
+def respect_by_level(df, labels, generators, main, n_bootstrap, seed, method, dimension, path=None,
+                     extra_modes=None):
+    """The respect of the requested level, separately for the videos where Low, Medium or High was
+    requested: for each mode and model, the share of those videos whose level found (by the method
+    at the main M, by the humans, or by an extra mode) equals the requested level, i.e. the recall of
+    each requested level. 95% CI over draws for the method's modes (over videos when there is a
+    single draw), over videos for the humans and extra modes. Answers that are not a level are left
+    out, as in the scores.
+
+    Returns the table and draws one panel per requested level.
+    """
+    if "reference" not in labels:
+        print("This section needs a reference level (REFERENCE_COLUMN).")
+        return None
+    rng = np.random.default_rng([seed, 1])
+
+    def share(groups):
+        # groups: one (correct, total) pair per resampling unit (draw or video)
+        groups = np.asarray(groups, dtype=float)
+        if len(groups) == 0 or groups[:, 1].sum() == 0:
+            return np.nan, np.nan, np.nan
+        boot = []
+        for _ in range(n_bootstrap):
+            sample = groups[rng.integers(0, len(groups), len(groups))]
+            boot.append(sample[:, 0].sum() / sample[:, 1].sum() if sample[:, 1].sum() else np.nan)
+        return groups[:, 0].sum() / groups[:, 1].sum(), np.nanpercentile(boot, 2.5), np.nanpercentile(boot, 97.5)
+
+    rows = []
+    for source in labels:
+        part = main[(main["examples"] == source) & main["pred"].isin(LEVELS)]
+        for generator in generators:
+            for level in LEVELS:
+                sub = part[(part["generator"] == generator) & (part["reference"] == level)]
+                units = [d for _, d in sub.groupby("draw")]
+                if len(units) == 1:  # a single draw: resample the videos
+                    units = [d.to_frame().T for _, d in sub.iterrows()]
+                accuracy, low, high = share([((d["pred"] == d["reference"]).sum(), len(d)) for d in units])
+                rows.append({"mode": f"examples: {source}", "generator": generator, "requested level": level,
+                             "n": len(sub), "accuracy": accuracy, "low": low, "high": high})
+    per_video = {"humans": df.assign(pred=df["level"]), **(extra_modes or {})}
+    for mode, frame in per_video.items():
+        frame = frame[frame["pred"].isin(LEVELS)]
+        for generator in generators:
+            for level in LEVELS:
+                sub = frame[(frame["generator"] == generator) & (frame["reference"] == level)]
+                accuracy, low, high = share([(float(c), 1.0) for c in sub["pred"] == sub["reference"]])
+                rows.append({"mode": mode, "generator": generator, "requested level": level,
+                             "n": len(sub), "accuracy": accuracy, "low": low, "high": high})
+    table = pd.DataFrame(rows)
+    display(table.assign(value=[f"{a:.2f} [{lo:.2f}, {hi:.2f}]" for a, lo, hi in
+                                zip(table["accuracy"], table["low"], table["high"])])
+            .pivot_table(index=["requested level", "mode"], columns="generator", values="value", aggfunc="first")
+            .reindex(LEVELS, level=0))
+
+    mode_order = ["humans", *[f"examples: {source}" for source in labels], *(extra_modes or {})]
+    width = 0.8 / len(generators)
+    fig, axes = plt.subplots(1, len(LEVELS), figsize=(6 * len(LEVELS), 4.2), sharey=True)
+    for ax, level in zip(axes, LEVELS):
+        for k, generator in enumerate(generators):
+            part = (table[(table["generator"] == generator) & (table["requested level"] == level)]
+                    .set_index("mode").reindex(mode_order))
+            x = np.arange(len(mode_order)) + (k - (len(generators) - 1) / 2) * width
+            ax.bar(x, part["accuracy"], width, label=generator,
+                   yerr=[part["accuracy"] - part["low"], part["high"] - part["accuracy"]], capsize=3)
+        ax.axvline(0.5, c="black", lw=0.8)
+        ax.axhline(1 / len(LEVELS), ls="--", c="grey", lw=1, label="chance")
+        ax.set_xticks(np.arange(len(mode_order)), mode_order, rotation=20, ha="right")
+        ax.set_title(f"requested {dimension}: {level}")
+    axes[0].set_ylabel("level found = requested level")
+    axes[-1].legend(title="generator", fontsize=8, loc="upper left", bbox_to_anchor=(1.01, 1))
+    fig.suptitle(f"{method} per model: respect of the requested {dimension} level, by requested level")
+    fig.tight_layout()
+    if path:
+        fig.savefig(path, dpi=300)
+    plt.show()
+    return table
+
+
 #%% Comparison of the methods
 
 METHOD_FILES = {"graph + FGW": "human_fgw_per_model", "embeddings": "human_embedding_per_model",
