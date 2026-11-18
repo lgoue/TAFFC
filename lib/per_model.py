@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import chi2_contingency
 
-from evaluation import LEVELS, load_labeled_transcripts
+from evaluation import LEVELS, load_labeled_transcripts, map_clusters
 
 INDEX = {level: k for k, level in enumerate(LEVELS)}
 
@@ -126,6 +126,41 @@ def run_draws(df, labels, generators, max_m, m_values, n_draws, seed, classify_d
     return draws.merge(df[["id", *labels.values()]], on="id")
 
 
+def run_unsupervised(df, labels, generators, n_runs, seed, cluster, cache_dir, cache_tag, dimension):
+    """Unsupervised setting: the videos of each model are clustered in 3 groups without any label,
+    ``n_runs`` times (different initializations), with ``cluster(generator, run, ids)`` returning one
+    cluster (0, 1, 2) per id. Each cluster is then mapped to a level with the Hungarian algorithm,
+    separately with each label (the mapping that agrees most with it): these rows have M = 0 and
+    examples = the label used for the mapping, so that they are scored like the draws.
+
+    The clusters are cached per model under a name that includes the texts and ``cache_tag``.
+    """
+    import time
+    os.makedirs(cache_dir, exist_ok=True)
+    results = []
+    for generator in generators:
+        part = df[df["generator"] == generator]
+        texts_hash = hashlib.sha1(pd.util.hash_pandas_object(part[["id", "text"]], index=False).values).hexdigest()[:10]
+        path = os.path.join(cache_dir, f"{dimension}_{generator}_unsupervised_runs{n_runs}_seed{seed}"
+                                       f"_{cache_tag}_{texts_hash}.csv")
+        start = time.time()
+        if os.path.exists(path):
+            result = pd.read_csv(path)
+        else:
+            ids = list(part["id"])
+            result = pd.concat([pd.DataFrame({"draw": run, "id": ids, "cluster": cluster(generator, run, ids)})
+                                for run in range(n_runs)], ignore_index=True)
+            result.to_csv(path, index=False)
+        results.append(result.assign(generator=generator))
+        print(f"{generator}, unsupervised: {time.time() - start:.0f} s")
+    clusters = pd.concat(results, ignore_index=True).merge(df[["id", *labels.values()]], on="id")
+    rows = []
+    for label, column in labels.items():
+        for _, part in clusters.groupby(["generator", "draw"]):
+            rows.append(part.assign(examples=label, M=0, pred=map_clusters(part["cluster"], part[column])))
+    return pd.concat(rows, ignore_index=True)
+
+
 #%% Scores
 
 def confusion(true, pred):
@@ -192,7 +227,8 @@ def score_draws(draws, labels, generators, n_bootstrap, seed):
 
 def plot_sensitivity(scores, labels, generators, metric, ylabel, chance, path=None, title=None):
     """Score as a function of M, one line per model (black: all models), band = 95% CI.
-    Rows: label of the examples; columns: label evaluated against. M = 0 is zero-shot."""
+    Rows: label of the examples; columns: label evaluated against. M = 0: no examples (unsupervised
+    clusters named with that label, or zero-shot)."""
     sources, targets = list(labels), list(labels)
     fig, axes = plt.subplots(len(sources), len(targets), figsize=(5.5 * len(targets), 3.8 * len(sources)),
                              squeeze=False, sharex=True, sharey=True)
@@ -209,7 +245,7 @@ def plot_sensitivity(scores, labels, generators, metric, ylabel, chance, path=No
                 ax.fill_between(s["M"], s[f"{metric} low"], s[f"{metric} high"], color=line.get_color(), alpha=0.15)
             ax.axhline(chance, ls="--", c="grey", lw=1)
             ax.set_title(f"examples: {source}, evaluated against {target}", fontsize=10)
-            ax.set_xlabel("M (examples per level" + (", 0 = zero-shot)" if (scores["M"] == 0).any() else ")"))
+            ax.set_xlabel("M (examples per level" + (", 0 = no examples)" if (scores["M"] == 0).any() else ")"))
             ax.set_ylabel(ylabel)
     axes[0, -1].legend(title="generator", fontsize=8, loc="upper left", bbox_to_anchor=(1.01, 1))
     if title:
@@ -470,7 +506,7 @@ def compare_methods(output_dir, dimension, labels, metric="accuracy", path=None)
                 ax.fill_between(s["M"], s[f"{metric} low"], s[f"{metric} high"], color=line.get_color(), alpha=0.15)
             ax.axhline(1 / len(LEVELS) if metric == "accuracy" else 0, ls="--", c="grey", lw=1)
             ax.set_title(f"examples: {source}, evaluated against {target}", fontsize=10)
-            ax.set_xlabel("M (examples per level, 0 = zero-shot)")
+            ax.set_xlabel("M (examples per level, 0 = unsupervised / zero-shot)")
             ax.set_ylabel(f"{metric} (all models)")
     axes[0, -1].legend(title="method", fontsize=8, loc="upper left", bbox_to_anchor=(1.01, 1))
     fig.tight_layout()
